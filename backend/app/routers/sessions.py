@@ -6,17 +6,23 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user
+from app.core.wireguard import (
+    generate_keypair,
+    next_available_ip,
+    build_client_config,
+    build_server_peer_command,
+)
 from app.models.gateway import GatewayStatus
 from app.models.machine import Machine
 from app.models.permission import MachinePermission
 from app.models.session import AccessSession, SessionStatus
 from app.models.user import User, UserRole
-from app.schemas.session import SessionRequest, SessionOut
+from app.schemas.session import SessionRequest, SessionOut, SessionCreatedOut
 
 router = APIRouter(prefix="/sessions", tags=["sessões de acesso"])
 
 
-@router.post("/request", response_model=SessionOut, status_code=201)
+@router.post("/request", response_model=SessionCreatedOut, status_code=201)
 def solicitar_sessao(
     payload: SessionRequest,
     db: Session = Depends(get_db),
@@ -26,8 +32,8 @@ def solicitar_sessao(
     Implementa o fluxo operacional do documento:
     1. Valida se o usuário tem permissão para a máquina.
     2. Verifica se o gateway está online.
-    3. Cria o registro de sessão (auditoria).
-    4. (Placeholder) Aciona a configuração do túnel WireGuard.
+    3. Gera um par de chaves WireGuard para o técnico e atribui um IP no túnel.
+    4. Cria o registro de sessão (auditoria) e devolve a config pronta para uso.
     """
     machine = db.query(Machine).filter(Machine.id == payload.machine_id).first()
     if not machine:
@@ -66,17 +72,31 @@ def solicitar_sessao(
         db.commit()
         raise HTTPException(status_code=409, detail="Gateway offline: não é possível iniciar sessão")
 
-    # 3. Cria sessão ativa (o provisionamento real do túnel WireGuard entra na Etapa 3)
+    # 3. Gera chaves WireGuard reais para o técnico
+    client_private_key, client_public_key = generate_keypair()
+    client_ip = next_available_ip(db)
+
+    # 4. Cria sessão ativa, já com a chave pública e o IP atribuído
     sessao = AccessSession(
         user_id=user.id,
         machine_id=machine.id,
         status=SessionStatus.ativa,
         iniciada_em=datetime.now(timezone.utc),
+        ip_cliente_vpn=client_ip,
+        client_public_key=client_public_key,
     )
     db.add(sessao)
     db.commit()
     db.refresh(sessao)
-    return sessao
+
+    wireguard_config = build_client_config(client_private_key, client_ip)
+    comando_servidor = build_server_peer_command(client_public_key, client_ip)
+
+    return SessionCreatedOut(
+        **SessionOut.model_validate(sessao).model_dump(),
+        wireguard_config=wireguard_config,
+        comando_autorizacao_servidor=comando_servidor,
+    )
 
 
 @router.post("/{session_id}/close", response_model=SessionOut)

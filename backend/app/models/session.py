@@ -31,6 +31,7 @@ class AccessSession(Base):
     iniciada_em = Column(DateTime, nullable=True)
     encerrada_em = Column(DateTime, nullable=True)
     ip_cliente_vpn = Column(String, nullable=True)  # IP atribuído ao técnico no túnel
+    client_public_key = Column(String, nullable=True)  # chave pública WireGuard do técnico
     observacoes = Column(String, nullable=True)
 
     user = relationship("User", back_populates="sessoes")
